@@ -16,23 +16,20 @@
 
 const AudioRecordingWorklet = `
 class AudioProcessingWorklet extends AudioWorkletProcessor {
-
-  // send and clear buffer every 2048 samples, 
-  // which at 16khz is about 8 times a second
   buffer = new Int16Array(2048);
-
-  // current write index
   bufferWriteIndex = 0;
+  inputSampleRate;
+  targetSampleRate;
+  lastInputSample = 0;
+  inputBuffer = [];
 
-  constructor() {
+  constructor(options) {
     super();
-    this.hasAudio = false;
+    this.inputSampleRate = options.processorOptions.inputSampleRate;
+    this.targetSampleRate = options.processorOptions.targetSampleRate;
+    this.resampleRatio = this.targetSampleRate / this.inputSampleRate;
   }
 
-  /**
-   * @param inputs Float32Array[][] [input#][channel#][sample#] so to access first inputs 1st channel inputs[0][0]
-   * @param outputs Float32Array[][]
-   */
   process(inputs) {
     if (inputs[0].length) {
       const channel0 = inputs[0][0];
@@ -45,25 +42,46 @@ class AudioProcessingWorklet extends AudioWorkletProcessor {
     this.port.postMessage({
       event: "chunk",
       data: {
-        int16arrayBuffer: this.buffer.slice(0, this.bufferWriteIndex).buffer,
-      },
+        int16arrayBuffer: this.buffer.slice(0, this.bufferWriteIndex).buffer
+      }
     });
     this.bufferWriteIndex = 0;
   }
 
+  // Optimized resampling for 48kHz to 16kHz (3:1 ratio)
+  resample(inputBuffer) {
+    // For 48kHz to 16kHz, we take every third sample
+    const outputLength = Math.floor(inputBuffer.length / 3);
+    const output = new Float32Array(outputLength);
+
+    // Simple averaging of 3 samples for better quality
+    for (let i = 0; i < outputLength; i++) {
+      const inputIndex = i * 3;
+      output[i] = (
+        inputBuffer[inputIndex] +
+        (inputBuffer[inputIndex + 1] || 0) +
+        (inputBuffer[inputIndex + 2] || 0)
+      ) / 3;
+    }
+
+    return output;
+  }
+
   processChunk(float32Array) {
-    const l = float32Array.length;
-    
-    for (let i = 0; i < l; i++) {
-      // convert float32 -1 to 1 to int16 -32768 to 32767
-      const int16Value = float32Array[i] * 32768;
+    // Resample the input
+    const resampled = this.resample(float32Array);
+
+    for (let i = 0; i < resampled.length; i++) {
+      // Convert float32 [-1, 1] to int16 [-32768, 32767]
+      const int16Value = Math.max(-32768, Math.min(32767, Math.round(resampled[i] * 32768)));
       this.buffer[this.bufferWriteIndex++] = int16Value;
-      if(this.bufferWriteIndex >= this.buffer.length) {
+
+      if (this.bufferWriteIndex >= this.buffer.length) {
         this.sendAndClearBuffer();
       }
     }
 
-    if(this.bufferWriteIndex >= this.buffer.length) {
+    if (this.bufferWriteIndex >= this.buffer.length) {
       this.sendAndClearBuffer();
     }
   }

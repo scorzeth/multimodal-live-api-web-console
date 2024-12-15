@@ -38,10 +38,11 @@ export class AudioRecorder extends EventEmitter {
   recording: boolean = false;
   recordingWorklet: AudioWorkletNode | undefined;
   vuWorklet: AudioWorkletNode | undefined;
+  resamplerNode: AudioWorkletNode | undefined;
 
   private starting: Promise<void> | null = null;
 
-  constructor(public sampleRate = 16000) {
+  constructor(public targetSampleRate = 16000) {
     super();
   }
 
@@ -52,7 +53,7 @@ export class AudioRecorder extends EventEmitter {
 
     this.starting = new Promise(async (resolve, reject) => {
       this.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      this.audioContext = await audioContext({ sampleRate: this.sampleRate });
+      this.audioContext = await audioContext();
       this.source = this.audioContext.createMediaStreamSource(this.stream);
 
       const workletName = "audio-recorder-worklet";
@@ -62,14 +63,17 @@ export class AudioRecorder extends EventEmitter {
       this.recordingWorklet = new AudioWorkletNode(
         this.audioContext,
         workletName,
+        {
+          processorOptions: {
+            targetSampleRate: this.targetSampleRate,
+            inputSampleRate: this.audioContext.sampleRate
+          }
+        }
       );
 
       this.recordingWorklet.port.onmessage = async (ev: MessageEvent) => {
-        // worklet processes recording floats and messages converted buffer
-        const arrayBuffer = ev.data.data.int16arrayBuffer;
-
-        if (arrayBuffer) {
-          const arrayBufferString = arrayBufferToBase64(arrayBuffer);
+        if (ev.data.event === "chunk" && ev.data.data.int16arrayBuffer) {
+          const arrayBufferString = arrayBufferToBase64(ev.data.data.int16arrayBuffer);
           this.emit("data", arrayBufferString);
         }
       };
@@ -101,6 +105,7 @@ export class AudioRecorder extends EventEmitter {
       this.stream = undefined;
       this.recordingWorklet = undefined;
       this.vuWorklet = undefined;
+      this.recording = false;
     };
     if (this.starting) {
       this.starting.then(handleStop);
